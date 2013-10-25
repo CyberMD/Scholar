@@ -1,20 +1,17 @@
-#! /usr/bin/env python
+#!/usr/bin/python
+ 
 """
 This module provides classes for querying Google Scholar and parsing
 returned results.  It currently *only* processes the first results
 page.  It is not a recursive crawler.
 """
-# Version: 1.3 -- $Date: 2012-02-01 16:51:16 -0800 (Wed, 01 Feb 2012) $
+# Version: 2.0 -- $Date: 2013-09-2-0700 (Mon, 2 Sep 2013) $
 #
 # ChangeLog
 # ---------
 #
-# 1.3:  Updates to reflect changes in Scholar's page rendering.
-#
-# 1.2:  Minor tweaks, mostly thanks to helpful feedback from Dan Bolser.
-#       Thanks Dan!
-#
-# 1.1:  Made author field explicit, added --author option.
+# 2.0:
+#  - updated module to work with curreng Google Scholar urls, Python 3.3 with BeautifulSoup 4
 #
 # pylint: disable-msg=C0111
 #
@@ -43,18 +40,20 @@ page.  It is not a recursive crawler.
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 # IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-
+ 
 import optparse
 import sys
 import re
 import urllib
-import urllib2
-from BeautifulSoup import BeautifulSoup
-
+import urllib.parse
+import urllib.request 
+import urllib.error
+from bs4 import BeautifulSoup
+ 
 class Article():
     """
     A class representing articles listed on Google Scholar.  The class
-    provides basic dictionary-like behavior.
+    provides basic dictionary-like behavior. 
     """
     def __init__(self):
         self.attrs = {'title':         [None, 'Title',          0],
@@ -64,22 +63,22 @@ class Article():
                       'url_citations': [None, 'Citations list', 4],
                       'url_versions':  [None, 'Versions list',  5],
                       'year':          [None, 'Year',           6]}
-
+ 
     def __getitem__(self, key):
         if key in self.attrs:
             return self.attrs[key][0]
         return None
-
+ 
     def __setitem__(self, key, item):
         if key in self.attrs:
             self.attrs[key][0] = item
         else:
             self.attrs[key] = [item, key, len(self.attrs)]
-
+ 
     def __delitem__(self, key):
         if key in self.attrs:
             del self.attrs[key]
-
+ 
     def as_txt(self):
         # Get items sorted in specified order:
         items = sorted(self.attrs.values(), key=lambda item: item[2])
@@ -87,7 +86,7 @@ class Article():
         max_label_len = max([len(str(item[1])) for item in items])
         fmt = '%%%ds %%s' % max_label_len
         return '\n'.join([fmt % (item[1], item[0]) for item in items])
-
+ 
     def as_csv(self, header=False, sep='|'):
         # Get keys sorted in specified order:
         keys = [pair[0] for pair in \
@@ -96,9 +95,10 @@ class Article():
         res = []
         if header:
             res.append(sep.join(keys))
+        ##got rid of "unicode(self.attrs[key][0])
         res.append(sep.join([str(self.attrs[key][0]) for key in keys]))
         return '\n'.join(res)
-
+ 
 class ScholarParser():
     """
     ScholarParser can parse HTML document strings obtained from Google
@@ -106,142 +106,90 @@ class ScholarParser():
     that was parsed successfully.
     """
     SCHOLAR_SITE = 'http://scholar.google.com'
-
+  
+ 
     def __init__(self, site=None):
         self.soup = None
         self.article = None
         self.site = site or self.SCHOLAR_SITE
         self.year_re = re.compile(r'\b(?:20|19)\d{2}\b')
-
+ 
     def handle_article(self, art):
         """
         In this base class, the callback does nothing.
         """
-
+ 
     def parse(self, html):
         """
         This method initiates parsing of HTML content.
         """
-        self.soup = BeautifulSoup(html)
+        self.soup = BeautifulSoup(html) 
         for div in self.soup.findAll(ScholarParser._tag_checker):
             self._parse_article(div)
-
+    
     def _parse_article(self, div):
         self.article = Article()
-
+ 
         for tag in div:
             if not hasattr(tag, 'name'):
                 continue
-
-            if tag.name == 'div' and tag.get('class') == 'gs_rt' and \
-                    tag.h3 and tag.h3.a:
-                self.article['title'] = ''.join(tag.h3.a.findAll(text=True))
-                self.article['url'] = self._path2url(tag.h3.a['href'])
-
-            if tag.name == 'font':
-                for tag2 in tag:
-                    if not hasattr(tag2, 'name'):
-                        continue
-                    if tag2.name == 'span' and tag2.get('class') == 'gs_fl':
-                        self._parse_links(tag2)
-
+ 
+            if tag.name == 'div' and str(tag.get('class')) == "['gs_ri']":
+              if tag.a:
+                self.article['title'] = ''.join(tag.a.findAll(text=True))
+                self.article['url'] = self._path2url(tag.a['href'])
+ 
+              if tag.find('div', {'class': 'gs_a'}):
+                year = self.year_re.findall(tag.find('div', {'class': 'gs_a'}).text)
+                self.article['year'] = year[0] if len(year) > 0 else None
+ 
+              if tag.find('div', {'class': 'gs_fl'}):
+                self._parse_links(tag.find('div', {'class': 'gs_fl'}))
+ 
         if self.article['title']:
             self.handle_article(self.article)
-
+            
+            
     def _parse_links(self, span):
         for tag in span:
             if not hasattr(tag, 'name'):
                 continue
             if tag.name != 'a' or tag.get('href') == None:
                 continue
-
+ 
             if tag.get('href').startswith('/scholar?cites'):
                 if hasattr(tag, 'string') and tag.string.startswith('Cited by'):
                     self.article['num_citations'] = \
                         self._as_int(tag.string.split()[-1])
                 self.article['url_citations'] = self._path2url(tag.get('href'))
-
+ 
             if tag.get('href').startswith('/scholar?cluster'):
                 if hasattr(tag, 'string') and tag.string.startswith('All '):
                     self.article['num_versions'] = \
                         self._as_int(tag.string.split()[1])
                 self.article['url_versions'] = self._path2url(tag.get('href'))
-
+ 
     @staticmethod
     def _tag_checker(tag):
-        if tag.name == 'div' and tag.get('class') == 'gs_r':
+        if tag.name == 'div' and str(tag.get('class')) == '[\'gs_r\']':
+            ##### print("found article!!")
             return True
-        return False
-
+        else:
+            return False
+ 
     def _as_int(self, obj):
         try:
             return int(obj)
         except ValueError:
             return None
-
+ 
     def _path2url(self, path):
         if path.startswith('http://'):
             return path
         if not path.startswith('/'):
             path = '/' + path
         return self.site + path
-
-class ScholarParser120201(ScholarParser):
-    """
-    This class reflects update to the Scholar results page layout that
-    Google recently.
-    """
-
-    def _parse_article(self, div):
-        self.article = Article()
-
-        for tag in div:
-            if not hasattr(tag, 'name'):
-                continue
-
-            if tag.name == 'h3' and tag.get('class') == 'gs_rt' and tag.a:
-                self.article['title'] = ''.join(tag.a.findAll(text=True))
-                self.article['url'] = self._path2url(tag.a['href'])
-
-            if tag.name == 'div' and tag.get('class') == 'gs_a':
-                year = self.year_re.findall(tag.text)
-                self.article['year'] = year[0] if len(year) > 0 else None
-
-            if tag.name == 'div' and tag.get('class') == 'gs_fl':
-                self._parse_links(tag)
-
-        if self.article['title']:
-            self.handle_article(self.article)
-
-class ScholarParser120726(ScholarParser):
-    """
-    This class reflects update to the Scholar results page layout that
-    Google made 07/26/12.
-    """
-
-    def _parse_article(self, div):
-        self.article = Article()
-
-        for tag in div:
-            if not hasattr(tag, 'name'):
-                continue
-
-            if tag.name == 'div' and tag.get('class') == 'gs_ri':
-              if tag.a:
-                self.article['title'] = ''.join(tag.a.findAll(text=True))
-                self.article['url'] = self._path2url(tag.a['href'])
-
-              if tag.find('div', {'class': 'gs_a'}):
-                year = self.year_re.findall(tag.find('div', {'class': 'gs_a'}).text)
-                self.article['year'] = year[0] if len(year) > 0 else None
-
-              if tag.find('div', {'class': 'gs_fl'}):
-                self._parse_links(tag.find('div', {'class': 'gs_fl'}))
-
-        if self.article['title']:
-            self.handle_article(self.article)
-
-
+ 
 class ScholarQuerier():
     """
     ScholarQuerier instances can conduct a search on Google Scholar
@@ -251,74 +199,79 @@ class ScholarQuerier():
     """
     SCHOLAR_URL = 'http://scholar.google.com/scholar?hl=en&q=%(query)s+author:%(author)s&btnG=Search&as_subj=eng&as_sdt=1,5&as_ylo=&as_vis=0'
     NOAUTH_URL = 'http://scholar.google.com/scholar?hl=en&q=%(query)s&btnG=Search&as_subj=eng&as_std=1,5&as_ylo=&as_vis=0'
-
-    """
-    Older URLs:
-    http://scholar.google.com/scholar?q=%s&hl=en&btnG=Search&as_sdt=2001&as_sdtp=on
-    """
-
+    JUSTAUTH_URL = 'http://scholar.google.com/scholar?hl=en&q=author:%(author)s&btnG=Search&as_subj=eng&as_sdt=1,5&as_ylo=&as_vis=0'
+ 
+ 
     UA = 'Mozilla/5.0 (X11; U; FreeBSD i386; en-US; rv:1.9.2.9) Gecko/20100913 Firefox/3.6.9'
-
-    class Parser(ScholarParser120726):
+ 
+    class Parser(ScholarParser):
         def __init__(self, querier):
             ScholarParser.__init__(self)
             self.querier = querier
-
+ 
         def handle_article(self, art):
             self.querier.add_article(art)
-
+ 
     def __init__(self, author='', scholar_url=None):
         self.articles = []
         self.author = author
+        # Clip to 20, as Google doesn't support more anyway 
+        self.count = 20 ## auto setting 20 as article return count
         if author == '':
             self.scholar_url = self.NOAUTH_URL
         else:
             self.scholar_url = scholar_url or self.SCHOLAR_URL
-
+ 
+        if self.count != 0:
+            self.scholar_url += '&num=%d' % self.count
+    		
+ 
     def query(self, search):
         """
         This method initiates a query with subsequent parsing of the
         response.
         """
-        url = self.scholar_url % {'query': urllib.quote(search.encode('utf-8')), 'author': urllib.quote(self.author)}
-        req = urllib2.Request(url=url,
-                              headers={'User-Agent': self.UA})
-        hdl = urllib2.urlopen(req)
+        if not search: ##if no search term other than an author
+            url = self.JUSTAUTH_URL % {'author': urllib.parse.quote(self.author)}
+        else:
+            url = self.scholar_url % {'query': urllib.parse.quote(search.encode('utf-8')), 'author': urllib.parse.quote(self.author)}
+        req = urllib.request.Request(url=url, headers={'User-Agent': self.UA})
+        hdl = urllib.request.urlopen(req)
         html = hdl.read()
         self.parse(html)
-
+        ##print("Here in Query - query= "+search+"\n url= "+url)
+ 
     def parse(self, html):
         """
         This method allows parsing of existing HTML content.
         """
         parser = self.Parser(self)
         parser.parse(html)
-
+ 
     def add_article(self, art):
         self.articles.append(art)
-
-
-
+ 
+        
 def txt(query, author, count):
-    querier = ScholarQuerier(author=author)
+    querier = ScholarQuerier(author=author, count=count)
     querier.query(query)
     articles = querier.articles
     if count > 0:
         articles = articles[:count]
     for art in articles:
-        print art.as_txt() + '\n'
-
+        print(art.as_txt() + '\n')
+ 
 def csv(query, author, count, header=False, sep='|'):
-    querier = ScholarQuerier(author=author)
+    querier = ScholarQuerier(author=author, count=count)
     querier.query(query)
     articles = querier.articles
     if count > 0:
         articles = articles[:count]
     for art in articles:
         result = art.as_csv(header=header, sep=sep)
-        print result.encode('utf-8')
+        print(result)
         header = False
-
+ 
 def url(title, author):
     querier = ScholarQuerier(author=author)
     querier.query(title)
@@ -327,7 +280,7 @@ def url(title, author):
         if "".join(title.lower().split()) == "".join(article['title'].lower().split()):
             return article['url'], article['year']
     return None, None
-
+ 
 def titles(author):
     querier = ScholarQuerier(author=author)
     querier.query('')
@@ -336,11 +289,11 @@ def titles(author):
     for article in articles:
       titles.append(article['title'])
     return titles
-
+ 
 def main():
     usage = """scholar.py [options] <query string>
 A command-line interface to Google Scholar."""
-
+ 
     fmt = optparse.IndentedHelpFormatter(max_help_position=50,
                                          width=100)
     parser = optparse.OptionParser(usage=usage, formatter=fmt)
@@ -356,19 +309,21 @@ A command-line interface to Google Scholar."""
                       help='Maximum number of results')
     parser.set_defaults(count=0, author='')
     options, args = parser.parse_args()
-
+ 
     if len(args) == 0:
-        print 'Hrrrm. I  need a query string.'
+        print ('Hrrrm. I  need a query string.')
         sys.exit(1)
-
+ 
     query = ' '.join(args)
-
+ 
     if options.csv:
         csv(query, author=options.author, count=options.count)
-    if options.csv_header:
+    elif options.csv_header:
         csv(query, author=options.author, count=options.count, header=True)
-    if options.txt:
+    elif options.html:
+        html(query, author=options.author, count=options.count)
+    else:
         txt(query, author=options.author, count=options.count)
-
+ 
 if __name__ == "__main__":
     main()
